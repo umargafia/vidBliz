@@ -2,8 +2,8 @@ import Replicate from 'replicate';
 import dotenv from 'dotenv';
 import { writeFile, mkdir } from 'fs/promises';
 import { createClient } from 'pexels';
-import path from 'path';
 import ffmpeg from 'fluent-ffmpeg';
+import fetch from 'node-fetch';
 
 dotenv.config();
 
@@ -11,70 +11,96 @@ const replicate = new Replicate({
   auth: process.env.REPLICATE_API_TOKEN,
 });
 
-// Initialize Pexels client
 const pexelsClient = createClient(process.env.PEXELS_API_KEY);
+const PIXABAY_API_KEY = process.env.PIXABAY_API_KEY; // Add to .env
+const MIXKIT_API_KEY = process.env.MIXKIT_API_KEY; // Optional, Mixkit doesn't always require API key
 
-// Function to extract keywords from script
-function extractKeywords(text) {
-  // Remove common words and extract meaningful keywords
-  const commonWords = new Set([
-    'the',
-    'a',
-    'an',
-    'and',
-    'or',
-    'but',
-    'in',
-    'on',
-    'at',
-    'to',
-    'for',
-    'of',
-    'with',
-    'by',
-    'is',
-    'are',
-    'was',
-    'were',
-    'be',
-    'been',
-    'have',
-    'has',
-    'had',
-    'do',
-    'does',
-    'did',
-    'will',
-    'would',
-    'could',
-    'should',
-    'may',
-    'might',
-    'can',
-    'our',
-    'your',
-    'their',
-    'we',
-    'you',
-    'they',
-    'it',
-    'this',
-    'that',
-    'these',
-    'those',
-  ]);
-
-  const words = text
-    .toLowerCase()
-    .replace(/[^\w\s]/g, ' ')
-    .split(/\s+/)
-    .filter((word) => word.length > 2 && !commonWords.has(word));
-
-  // Return unique keywords
-  return [...new Set(words)];
+// Improved keyword extraction with context
+async function extractKeywords(segment) {
+  try {
+    const input = {
+      prompt: `Extract 3-5 specific, contextually relevant keywords from the following text for searching stock media related to cooking, catering, or education: "${segment}". Avoid generic words like 'learn', 'cook', 'join'.`,
+      max_tokens: 50,
+    };
+    let keywords = [];
+    for await (const event of replicate.stream('openai/gpt-5', { input })) {
+      keywords.push(event);
+    }
+    return keywords
+      .join('')
+      .split(',')
+      .map((k) => k.trim())
+      .filter((k) => k.length > 2);
+  } catch (error) {
+    console.error('Error extracting keywords:', error.message);
+    // Fallback to simple keyword extraction
+    const commonWords = new Set([
+      'the',
+      'a',
+      'an',
+      'and',
+      'or',
+      'but',
+      'in',
+      'on',
+      'at',
+      'to',
+      'for',
+      'of',
+      'with',
+      'by',
+      'is',
+      'are',
+      'was',
+      'were',
+      'be',
+      'been',
+      'have',
+      'has',
+      'had',
+      'do',
+      'does',
+      'did',
+      'will',
+      'would',
+      'could',
+      'should',
+      'may',
+      'might',
+      'can',
+      'our',
+      'your',
+      'their',
+      'we',
+      'you',
+      'they',
+      'it',
+      'this',
+      'that',
+      'these',
+      'those',
+      'learn',
+      'cook',
+      'join',
+    ]);
+    const words = segment
+      .toLowerCase()
+      .replace(/[^\w\s]/g, ' ')
+      .split(/\s+/)
+      .filter((word) => word.length > 2 && !commonWords.has(word));
+    return [...new Set(words)].slice(0, 5);
+  }
 }
 
-// Function to download media from URL
+// Function to segment script
+function segmentScript(script) {
+  return script
+    .split(/[.!?]/)
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
+}
+
+// Download media from URL
 async function downloadMedia(url, filename) {
   try {
     const response = await fetch(url);
@@ -87,137 +113,178 @@ async function downloadMedia(url, filename) {
   }
 }
 
-// Function to search and download Pexels videos
-async function searchAndDownloadVideos(keywords, limit = 3) {
-  try {
-    console.log(
-      'Searching for videos with keywords:',
-      keywords.slice(0, 3).join(', ')
-    );
+// Search and download media from multiple sources
+async function searchAndDownloadMedia(
+  keywords,
+  segment,
+  type = 'video',
+  limit = 1
+) {
+  const query = keywords.join(' ');
+  console.log(`Searching for ${type}s with keywords: ${query}`);
 
-    const query = keywords.slice(0, 3).join(' ');
-    const videos = await pexelsClient.videos.search({ query, per_page: limit });
-
-    if (!videos.videos || videos.videos.length === 0) {
-      console.log('No videos found');
-      return [];
-    }
-
-    const downloadedVideos = [];
-
-    for (let i = 0; i < Math.min(videos.videos.length, limit); i++) {
-      const video = videos.videos[i];
-      // Get the smallest HD video file for faster download
-      const videoFile =
-        video.video_files.find((file) => file.quality === 'hd') ||
-        video.video_files[0];
-
-      if (videoFile) {
-        const filename = `assets/videos/video_${i + 1}.mp4`;
-        console.log(`Downloading video ${i + 1}/${limit}...`);
-
-        const downloaded = await downloadMedia(videoFile.link, filename);
-        if (downloaded) {
-          downloadedVideos.push({
-            filename: downloaded,
-            url: video.url,
-            photographer: video.user.name,
-          });
+  const sources = [
+    {
+      name: 'Pexels',
+      search: async () => {
+        try {
+          if (type === 'video') {
+            const videos = await pexelsClient.videos.search({
+              query,
+              per_page: limit,
+            });
+            return videos.videos.map((v) => ({
+              url:
+                v.video_files.find((f) => f.quality === 'hd')?.link ||
+                v.video_files[0].link,
+              creator: v.user.name,
+              tags: v.video_tags || [],
+            }));
+          } else {
+            const photos = await pexelsClient.photos.search({
+              query,
+              per_page: limit,
+            });
+            return photos.photos.map((p) => ({
+              url: p.src.large,
+              creator: p.photographer,
+              tags: [],
+            }));
+          }
+        } catch (error) {
+          console.error(`Pexels ${type} search failed:`, error.message);
+          return [];
         }
-      }
-    }
+      },
+    },
+    {
+      name: 'Pixabay',
+      search: async () => {
+        try {
+          const response = await fetch(
+            `https://pixabay.com/api/${
+              type === 'video' ? 'videos' : ''
+            }?key=${PIXABAY_API_KEY}&q=${encodeURIComponent(
+              query
+            )}&per_page=${limit}`
+          );
+          const data = await response.json();
+          return (type === 'video' ? data.hits : data.hits).map((h) => ({
+            url: type === 'video' ? h.videos.medium.url : h.largeImageURL,
+            creator: h.user,
+            tags: h.tags.split(', '),
+          }));
+        } catch (error) {
+          console.error(`Pixabay ${type} search failed:`, error.message);
+          return [];
+        }
+      },
+    },
+    {
+      name: 'Mixkit',
+      search: async () => {
+        try {
+          const response = await fetch(
+            `https://mixkit.co/api/free-stock-videos/?q=${encodeURIComponent(
+              query
+            )}&per_page=${limit}`
+          );
+          const data = await response.json();
+          return type === 'video'
+            ? data.assets.map((a) => ({
+                url: a.url,
+                creator: 'Mixkit',
+                tags: a.tags || [],
+              }))
+            : [];
+        } catch (error) {
+          console.error(`Mixkit ${type} search failed:`, error.message);
+          return [];
+        }
+      },
+    },
+  ];
 
-    return downloadedVideos;
-  } catch (error) {
-    console.error('Error searching/downloading videos:', error.message);
-    return [];
+  let allMedia = [];
+  for (const source of sources) {
+    const media = await source.search();
+    allMedia.push(...media.map((m) => ({ ...m, source: source.name })));
   }
+
+  // Filter media by relevance (check if tags match keywords)
+  const relevantMedia = allMedia
+    .filter((m) => {
+      const tagMatch = m.tags.some((t) =>
+        keywords.some((k) => t.toLowerCase().includes(k.toLowerCase()))
+      );
+      return tagMatch || m.source === 'Pexels'; // Fallback to Pexels if no tag match
+    })
+    .slice(0, limit);
+
+  const downloadedMedia = [];
+  for (let i = 0; i < Math.min(relevantMedia.length, limit); i++) {
+    const item = relevantMedia[i];
+    const ext = type === 'video' ? 'mp4' : 'jpg';
+    const filename = `assets/${type}s/${type}_${item.source}_${Date.now()}_${
+      i + 1
+    }.${ext}`;
+    console.log(`Downloading ${type} from ${item.source}...`);
+    const downloaded = await downloadMedia(item.url, filename);
+    if (downloaded) {
+      downloadedMedia.push({
+        filename,
+        url: item.url,
+        creator: item.creator,
+        source: item.source,
+        segment,
+      });
+    }
+  }
+  return downloadedMedia;
 }
 
-// Function to search and download Pexels photos
-async function searchAndDownloadPhotos(keywords, limit = 5) {
-  try {
-    console.log(
-      'Searching for photos with keywords:',
-      keywords.slice(0, 3).join(', ')
-    );
-
-    const query = keywords.slice(0, 3).join(' ');
-    const photos = await pexelsClient.photos.search({ query, per_page: limit });
-
-    if (!photos.photos || photos.photos.length === 0) {
-      console.log('No photos found');
-      return [];
-    }
-
-    const downloadedPhotos = [];
-
-    for (let i = 0; i < Math.min(photos.photos.length, limit); i++) {
-      const photo = photos.photos[i];
-      const filename = `assets/photos/photo_${i + 1}.jpg`;
-      console.log(`Downloading photo ${i + 1}/${limit}...`);
-
-      const downloaded = await downloadMedia(photo.src.large, filename);
-      if (downloaded) {
-        downloadedPhotos.push({
-          filename: downloaded,
-          url: photo.url,
-          photographer: photo.photographer,
-        });
-      }
-    }
-
-    return downloadedPhotos;
-  } catch (error) {
-    console.error('Error searching/downloading photos:', error.message);
-    return [];
-  }
-}
-
-// Function to get audio duration
+// Get audio duration
 async function getAudioDuration(audioPath) {
   return new Promise((resolve, reject) => {
     ffmpeg.ffprobe(audioPath, (err, metadata) => {
-      if (err) {
-        reject(err);
-      } else {
-        resolve(metadata.format.duration);
-      }
+      if (err) reject(err);
+      else resolve(metadata.format.duration);
     });
   });
 }
 
-// Function to create video slideshow from images
-async function createImageSlideshow(photos, audioDuration) {
-  if (photos.length === 0) return null;
+// Create dynamic video with timed visuals
+async function createDynamicVideo(media, segmentTimings, audioDuration) {
+  if (media.length === 0) return null;
 
-  console.log('Creating image slideshow...');
-  const durationPerImage = Math.max(1, audioDuration / photos.length); // Minimum 1 second per image
-
+  console.log('Creating dynamic video...');
   return new Promise((resolve, reject) => {
     const command = ffmpeg();
-
-    // Add all images with duration
-    photos.forEach((photo, index) => {
-      command
-        .input(photo.filename)
-        .inputOptions(['-loop', '1', '-t', durationPerImage.toString()]);
-    });
-
-    // Create filter complex for slideshow
     let filterComplex = '';
-    photos.forEach((photo, index) => {
-      filterComplex += `[${index}:v]scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=30[img${index}];`;
+    const inputs = [];
+
+    media.forEach((item, index) => {
+      const duration = segmentTimings[index].end - segmentTimings[index].start;
+      if (item.filename.endsWith('.mp4')) {
+        command
+          .input(item.filename)
+          .inputOptions(['-ss', '0', '-t', duration.toString()]);
+        filterComplex += `[${index}:v]scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=30[v${index}];`;
+      } else {
+        command
+          .input(item.filename)
+          .inputOptions(['-loop', '1', '-t', duration.toString()]);
+        filterComplex += `[${index}:v]scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=30[v${index}];`;
+      }
+      inputs.push(`[v${index}]`);
     });
 
-    // Concatenate all scaled images
     filterComplex +=
-      photos.map((_, index) => `[img${index}]`).join('') +
-      `concat=n=${photos.length}:v=1:a=0[slideshow]`;
+      inputs.join('') + `concat=n=${media.length}:v=1:a=0[dynamic]`;
 
     command
       .complexFilter(filterComplex)
-      .map('[slideshow]')
+      .map('[dynamic]')
       .outputOptions([
         '-t',
         audioDuration.toString(),
@@ -228,110 +295,32 @@ async function createImageSlideshow(photos, audioDuration) {
         '-r',
         '30',
       ])
-      .output('assets/slideshow.mp4')
-      .on('start', () => console.log('Creating slideshow...'))
+      .output('assets/dynamic_video.mp4')
+      .on('start', () => console.log('Creating dynamic video...'))
       .on('progress', (progress) => {
-        if (progress.percent) {
-          console.log(`Slideshow progress: ${Math.round(progress.percent)}%`);
-        }
-      })
-      .on('end', () => {
-        console.log('Slideshow created successfully');
-        resolve('assets/slideshow.mp4');
-      })
-      .on('error', (err) => {
-        console.error('Error creating slideshow:', err.message);
-        reject(err);
-      })
-      .run();
-  });
-}
-
-// Function to create video montage from videos
-async function createVideoMontage(videos, audioDuration) {
-  if (videos.length === 0) return null;
-
-  console.log('Creating video montage...');
-  const durationPerVideo = audioDuration / videos.length;
-
-  return new Promise((resolve, reject) => {
-    const command = ffmpeg();
-
-    // Add all videos with duration limit
-    videos.forEach((video, index) => {
-      command
-        .input(video.filename)
-        .inputOptions(['-ss', '0', '-t', durationPerVideo.toString()]);
-    });
-
-    // Create filter complex for video concatenation
-    let filterComplex = '';
-    videos.forEach((video, index) => {
-      filterComplex += `[${index}:v]scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=30[v${index}];`;
-    });
-
-    // Concatenate all processed videos
-    filterComplex +=
-      videos.map((_, index) => `[v${index}]`).join('') +
-      `concat=n=${videos.length}:v=1:a=0[montage]`;
-
-    command
-      .complexFilter(filterComplex)
-      .map('[montage]')
-      .outputOptions([
-        '-t',
-        audioDuration.toString(),
-        '-c:v',
-        'libx264',
-        '-pix_fmt',
-        'yuv420p',
-      ])
-      .output('assets/video_montage.mp4')
-      .on('start', () => console.log('Creating video montage...'))
-      .on('progress', (progress) => {
-        if (progress.percent) {
+        if (progress.percent)
           console.log(
-            `Video montage progress: ${Math.round(progress.percent)}%`
+            `Dynamic video progress: ${Math.round(progress.percent)}%`
           );
-        }
       })
       .on('end', () => {
-        console.log('Video montage created successfully');
-        resolve('assets/video_montage.mp4');
+        console.log('Dynamic video created successfully');
+        resolve('assets/dynamic_video.mp4');
       })
       .on('error', (err) => {
-        console.error('Error creating video montage:', err.message);
+        console.error('Error creating dynamic video:', err.message);
         reject(err);
       })
       .run();
   });
 }
 
-// Function to combine video clips and images into final ad
-async function createFinalAd(videoMontage, slideshow, audioPath, script) {
+// Combine video and audio
+async function createFinalAd(videoPath, audioPath) {
   console.log('Creating final advertisement...');
-
   return new Promise((resolve, reject) => {
-    const command = ffmpeg();
-
-    // Determine which visual content to use
-    const hasVideoMontage = videoMontage && videoMontage !== null;
-    const hasSlideshow = slideshow && slideshow !== null;
-
-    console.log(`Video montage available: ${hasVideoMontage}`);
-    console.log(`Slideshow available: ${hasSlideshow}`);
-
-    if (!hasVideoMontage && !hasSlideshow) {
-      reject(new Error('No video or image content available'));
-      return;
-    }
-
-    // Prefer video montage if available, otherwise use slideshow
-    const visualInput = hasVideoMontage ? videoMontage : slideshow;
-    console.log(`Using visual input: ${visualInput}`);
-
-    command
-      .input(visualInput)
+    ffmpeg()
+      .input(videoPath)
       .input(audioPath)
       .outputOptions([
         '-c:v',
@@ -345,12 +334,11 @@ async function createFinalAd(videoMontage, slideshow, audioPath, script) {
       .output('assets/final_ad.mp4')
       .on('start', () => console.log('Combining video and audio...'))
       .on('progress', (progress) => {
-        if (progress.percent) {
+        if (progress.percent)
           console.log(`Final ad progress: ${Math.round(progress.percent)}%`);
-        }
       })
       .on('end', () => {
-        console.log('Final advertisement created successfully!');
+        console.log('Final advertisement created successfully');
         resolve('assets/final_ad.mp4');
       })
       .on('error', (err) => {
@@ -361,18 +349,15 @@ async function createFinalAd(videoMontage, slideshow, audioPath, script) {
   });
 }
 
-// Function to add text overlay to video
-async function addTextOverlay(inputVideo, text, outputPath) {
+// Add text overlay
+async function addTextOverlay(inputVideo, text, outputPath, timing) {
   console.log('Adding text overlay to video...');
-
   return new Promise((resolve, reject) => {
-    // Clean and prepare text for FFmpeg
     const cleanText = text
       .replace(/['"]/g, '')
       .replace(/\n/g, ' ')
-      .substring(0, 100);
-
-    const textFilter = `drawtext=fontfile=/System/Library/Fonts/Arial.ttf:text='${cleanText}':fontcolor=white:fontsize=48:box=1:boxcolor=black@0.7:boxborderw=5:x=(w-text_w)/2:y=h-th-20`;
+      .substring(0, 50);
+    const textFilter = `drawtext=fontfile=/System/Library/Fonts/Arial.ttf:text='${cleanText}':fontcolor=white:fontsize=48:box=1:boxcolor=black@0.7:boxborderw=5:x=(w-text_w)/2:y=h-th-20:enable='between(t,${timing.start},${timing.end})'`;
 
     ffmpeg(inputVideo)
       .videoFilters(textFilter)
@@ -380,11 +365,10 @@ async function addTextOverlay(inputVideo, text, outputPath) {
       .output(outputPath)
       .on('start', () => console.log('Adding text overlay...'))
       .on('progress', (progress) => {
-        if (progress.percent) {
+        if (progress.percent)
           console.log(
             `Text overlay progress: ${Math.round(progress.percent)}%`
           );
-        }
       })
       .on('end', () => {
         console.log('Text overlay added successfully');
@@ -398,184 +382,178 @@ async function addTextOverlay(inputVideo, text, outputPath) {
   });
 }
 
-const prompt =
-  'Create an engaging ad for Sabikuk, the online catering school and marketplace where chefs teach, sell recipes and spices, and students learn to cook anytime, anywhere.';
+// Main execution
+(async () => {
+  try {
+    // Create directories
+    await mkdir('assets', { recursive: true });
+    await mkdir('assets/videos', { recursive: true });
+    await mkdir('assets/photos', { recursive: true });
+    console.log('Assets directories created');
 
-const input = {
-  prompt: `Generate a 30-50 word video ad script for: ${prompt}. Keep it concise, engaging, and suitable for a 15-30 second ad. Use a warm, inviting tone and include a clear call-to-action.`,
-  max_tokens: 100,
-};
+    // Generate script
+    const prompt =
+      'Create an engaging ad for Sabikuk, the online catering school and marketplace where chefs teach, sell recipes and spices, and students learn to cook anytime, anywhere.';
+    const input = {
+      prompt: `Generate a 30-50 word video ad script for: ${prompt}. Keep it concise, engaging, and suitable for a 15-30 second ad. Use a warm, inviting tone and include a clear call-to-action. Split into 3-4 sentences.`,
+      max_tokens: 100,
+    };
 
-// Create assets directory structure
-try {
-  await mkdir('assets', { recursive: true });
-  await mkdir('assets/videos', { recursive: true });
-  await mkdir('assets/photos', { recursive: true });
-  console.log('Assets directories created');
-} catch (error) {
-  console.log(
-    'Assets directories already exist or error creating them:',
-    error.message
-  );
-}
+    console.log('Generating script...');
+    let script = '';
+    for await (const event of replicate.stream('openai/gpt-5', { input })) {
+      script += event;
+    }
+    console.log('Generated script:', script);
 
-console.log('Generating script...');
-let script = '';
-for await (const event of replicate.stream('openai/gpt-5', { input })) {
-  script += event;
-}
-console.log('Generated script:', script);
+    // Segment script and extract keywords
+    const segments = segmentScript(script);
+    console.log('Script segments:', segments);
+    const segmentKeywords = await Promise.all(
+      segments.map((segment) => extractKeywords(segment))
+    );
+    console.log('Segment keywords:', segmentKeywords);
 
-// Extract keywords from the generated script
-const keywords = extractKeywords(script);
-console.log('Extracted keywords:', keywords);
+    // Generate audio
+    const audioInput = {
+      text: script,
+      pitch: 0,
+      speed: 1,
+      volume: 1,
+      bitrate: 128000,
+      channel: 'mono',
+      emotion: 'auto',
+      voice_id: 'English_CalmWoman',
+      sample_rate: 32000,
+      language_boost: 'English',
+      english_normalization: true,
+    };
 
-const AudioInput = {
-  text: script,
-  pitch: 0,
-  speed: 1,
-  volume: 1,
-  bitrate: 128000,
-  channel: 'mono',
-  emotion: 'auto',
-  voice_id: 'English_CalmWoman',
-  sample_rate: 32000,
-  language_boost: 'English',
-  english_normalization: true,
-};
+    console.log('Generating audio...');
+    const audioOutput = await replicate.run('minimax/speech-02-hd', {
+      input: audioInput,
+    });
+    const audioResponse = await fetch(audioOutput);
+    const audioBuffer = await audioResponse.arrayBuffer();
+    await writeFile('assets/output_audio.wav', Buffer.from(audioBuffer));
+    console.log('Audio file saved as assets/output_audio.wav');
 
-console.log('Generating audio...');
-const output = await replicate.run('minimax/speech-02-hd', {
-  input: AudioInput,
-});
+    // Get audio duration
+    const audioDuration = await getAudioDuration('assets/output_audio.wav');
+    console.log(`Audio duration: ${audioDuration.toFixed(2)} seconds`);
 
-// The output is a FileOutput object with a URL, we need to fetch the audio data
-console.log('Generated audio URL:', output);
+    // Assign timings to segments
+    const segmentDuration = audioDuration / segments.length;
+    const segmentTimings = segments.map((_, index) => ({
+      start: index * segmentDuration,
+      end: (index + 1) * segmentDuration,
+    }));
+    console.log('Segment timings:', segmentTimings);
 
-// Fetch the audio data from the URL
-const response = await fetch(output);
-const audioBuffer = await response.arrayBuffer();
+    // Download media for each segment from multiple sources
+    const downloadedMedia = [];
+    for (let i = 0; i < segments.length; i++) {
+      console.log(
+        `\n--- Fetching Media for Segment ${i + 1}: "${segments[i]}" ---`
+      );
+      let media = await searchAndDownloadMedia(
+        segmentKeywords[i],
+        segments[i],
+        'video',
+        1
+      );
+      if (media.length === 0) {
+        console.log(`No videos found for segment ${i + 1}, trying photos...`);
+        media = await searchAndDownloadMedia(
+          segmentKeywords[i],
+          segments[i],
+          'photo',
+          1
+        );
+      }
+      if (media.length > 0) {
+        downloadedMedia.push({
+          ...media[0],
+          segment: segments[i],
+          timing: segmentTimings[i],
+        });
+      } else {
+        console.log(`No media found for segment ${i + 1}, using fallback...`);
+        downloadedMedia.push({
+          filename: 'assets/fallback.jpg',
+          segment: segments[i],
+          timing: segmentTimings[i],
+          source: 'Local',
+          creator: 'Fallback',
+        });
+      }
+    }
 
-// Write the audio data to file
-await writeFile('assets/output_audio.wav', Buffer.from(audioBuffer));
-console.log('Audio file saved as assets/output_audio.wav');
+    // Filter out null media
+    const validMedia = downloadedMedia.filter((m) => m.filename);
+    console.log(`Downloaded ${validMedia.length} media files`);
 
-// Search and download videos based on keywords
-console.log('\n--- Fetching Videos from Pexels ---');
-const downloadedVideos = await searchAndDownloadVideos(keywords, 3);
+    // Create dynamic video
+    let dynamicVideo = null;
+    if (validMedia.length > 0) {
+      dynamicVideo = await createDynamicVideo(
+        validMedia,
+        segmentTimings,
+        audioDuration
+      );
+      console.log(`Dynamic video created: ${dynamicVideo}`);
+    } else {
+      throw new Error('No media available to create video');
+    }
 
-// Search and download photos based on keywords
-console.log('\n--- Fetching Photos from Pexels ---');
-const downloadedPhotos = await searchAndDownloadPhotos(keywords, 5);
+    // Create final ad
+    const finalAdPath = await createFinalAd(
+      dynamicVideo,
+      'assets/output_audio.wav'
+    );
+    console.log(`Final ad created: ${finalAdPath}`);
 
-// Get audio duration for video timing
-console.log('\n--- Analyzing Audio Duration ---');
-const audioDuration = await getAudioDuration('assets/output_audio.wav');
-console.log(`Audio duration: ${audioDuration.toFixed(2)} seconds`);
+    // Add text overlays
+    let finalAdWithText = finalAdPath;
+    for (let i = 0; i < validMedia.length; i++) {
+      const outputPath = `assets/final_ad_with_text_${i + 1}.mp4`;
+      finalAdWithText = await addTextOverlay(
+        finalAdWithText,
+        validMedia[i].segment,
+        outputPath,
+        validMedia[i].timing
+      );
+      console.log(`Text overlay for segment ${i + 1}: ${finalAdWithText}`);
+    }
 
-// Create video content
-console.log('\n--- Creating Video Content ---');
-let videoMontage = null;
-let slideshow = null;
+    // Create asset summary
+    const assetSummary = {
+      script,
+      segments,
+      audio: 'assets/output_audio.wav',
+      media: validMedia,
+      dynamicVideo,
+      finalAd: finalAdPath,
+      finalAdWithText,
+      audioDuration,
+      segmentTimings,
+    };
+    await writeFile(
+      'assets/asset_summary.json',
+      JSON.stringify(assetSummary, null, 2)
+    );
+    console.log('Asset summary saved to: assets/asset_summary.json');
 
-// Create video montage if videos are available
-if (downloadedVideos.length > 0) {
-  console.log(
-    `Creating video montage from ${downloadedVideos.length} videos...`
-  );
-  videoMontage = await createVideoMontage(downloadedVideos, audioDuration);
-  console.log(`Video montage created: ${videoMontage}`);
-} else {
-  console.log('No videos available for montage');
-}
-
-// Create slideshow if photos are available
-if (downloadedPhotos.length > 0) {
-  console.log(`Creating slideshow from ${downloadedPhotos.length} photos...`);
-  slideshow = await createImageSlideshow(downloadedPhotos, audioDuration);
-  console.log(`Slideshow created: ${slideshow}`);
-} else {
-  console.log('No photos available for slideshow');
-}
-
-// Create final advertisement
-console.log('\n--- Creating Final Advertisement ---');
-let finalAdPath = null;
-if (videoMontage || slideshow) {
-  finalAdPath = await createFinalAd(
-    videoMontage,
-    slideshow,
-    'assets/output_audio.wav',
-    script
-  );
-
-  // Add text overlay with script excerpt
-  const scriptExcerpt = script.split(' ').slice(0, 8).join(' ') + '...';
-  const finalAdWithText = await addTextOverlay(
-    finalAdPath,
-    scriptExcerpt,
-    'assets/final_ad_with_text.mp4'
-  );
-
-  console.log('Final ad with text overlay:', finalAdWithText);
-}
-
-// Create a summary of all generated assets
-const assetSummary = {
-  script: script,
-  audio: 'assets/output_audio.wav',
-  videos: downloadedVideos,
-  photos: downloadedPhotos,
-  videoMontage: videoMontage,
-  slideshow: slideshow,
-  finalAd: finalAdPath,
-  finalAdWithText: finalAdPath ? 'assets/final_ad_with_text.mp4' : null,
-  audioDuration: audioDuration,
-  keywords: keywords,
-};
-
-// Save asset summary to JSON file
-await writeFile(
-  'assets/asset_summary.json',
-  JSON.stringify(assetSummary, null, 2)
-);
-
-console.log('\n--- Process Completed Successfully! ---');
-console.log(`Generated Script: "${script}"`);
-console.log(
-  `Audio File: assets/output_audio.wav (${audioDuration.toFixed(2)}s)`
-);
-console.log(`Videos Downloaded: ${downloadedVideos.length}`);
-console.log(`Photos Downloaded: ${downloadedPhotos.length}`);
-
-if (videoMontage) {
-  console.log(`Video Montage: ${videoMontage}`);
-}
-
-if (slideshow) {
-  console.log(`Image Slideshow: ${slideshow}`);
-}
-
-if (finalAdPath) {
-  console.log(`🎬 FINAL ADVERTISEMENT: assets/final_ad_with_text.mp4`);
-  console.log(`📹 Basic Version: ${finalAdPath}`);
-  console.log(`📂 Videos saved in assets/ directory for organization`);
-}
-
-console.log('Asset summary saved to: assets/asset_summary.json');
-
-if (downloadedVideos.length > 0) {
-  console.log('\nDownloaded Videos:');
-  downloadedVideos.forEach((video, index) => {
-    console.log(`  ${index + 1}. ${video.filename} (by ${video.photographer})`);
-  });
-}
-
-if (downloadedPhotos.length > 0) {
-  console.log('\nDownloaded Photos:');
-  downloadedPhotos.forEach((photo, index) => {
-    console.log(`  ${index + 1}. ${photo.filename} (by ${photo.photographer})`);
-  });
-}
-
-console.log('\n🎉 Your complete video advertisement is ready!');
+    // Log results
+    console.log('\n--- Process Completed Successfully! ---');
+    console.log(`Generated Script: "${script}"`);
+    console.log(
+      `Audio File: assets/output_audio.wav (${audioDuration.toFixed(2)}s)`
+    );
+    console.log(`Media Files Downloaded: ${validMedia.length}`);
+    console.log(`Final Advertisement: ${finalAdWithText}`);
+    console.log('\n🎉 Your dynamic video advertisement is ready!');
+  } catch (error) {
+    console.error('Error in ad creation:', error.message);
+  }
+})();
