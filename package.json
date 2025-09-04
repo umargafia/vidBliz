@@ -2,6 +2,7 @@
   "name": "vidbliz",
   "version": "1.0.0",
   "main": "index.js",
+  "type": "module",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1"
   },
@@ -14,6 +15,7 @@
     "express": "^5.1.0",
     "fluent-ffmpeg": "^2.1.3",
     "pexels": "^1.4.0",
-    "replicate": "^1.1.0"
+    "replicate": "^1.1.0",
+    "uuid": "^11.1.0"
   }
 }

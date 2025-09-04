@@ -1,45 +1,115 @@
-import Replicate from 'replicate';
-import dotenv from 'dotenv';
-import { writeFile, mkdir } from 'fs/promises';
-import { createClient } from 'pexels';
-import ffmpeg from 'fluent-ffmpeg';
-import fetch from 'node-fetch';
 import {
   generateAudio,
   generateScript,
   getVideoKeywords,
-} from '../utilities/video.utilities';
-
-const replicate = new Replicate({
-  auth: process.env.REPLICATE_API_TOKEN,
-});
-
-const pexelsClient = createClient(process.env.PEXELS_API_KEY);
-const PIXABAY_API_KEY = process.env.PIXABAY_API_KEY; // Add to .env
-const MIXKIT_API_KEY = process.env.MIXKIT_API_KEY; // Optional, Mixkit doesn't always require API key
+  downloadVideo,
+  executeVideoEditing,
+} from '../utilities/video.utilities.js';
 
 export const generateVideo = async (req, res) => {
-  const { prompt } = req.body;
-  //genrate script
-  console.log('generating script');
-  const script = await generateScript(prompt);
-  console.log('script generated');
+  try {
+    const { prompt } = req.body;
 
-  //genrate audio
-  console.log('generating audio');
-  const audio = await generateAudio(script);
-  console.log('audio generated');
+    if (!prompt) {
+      return res.status(400).json({
+        success: false,
+        error: {
+          message: 'Prompt is required',
+          code: 'MISSING_PROMPT',
+        },
+      });
+    }
 
-  // get video keywords
-  console.log('getting video keywords');
-  const videoKeywords = await getVideoKeywords(script);
-  console.log('video keywords generated');
+    console.log(`Starting video generation for prompt: "${prompt}"`);
 
-  //edit video
-  console.log('editing video');
-  const editingScript = await generateVideoEditing(script, code);
-  console.log('video editing script generated');
+    // Generate script
+    console.log('Generating script...');
+    const script = await generateScript(prompt);
+    console.log('Script generated successfully');
 
-  //download video
-  //edit video
+    // Generate audio
+    console.log('Generating audio...');
+    const audioFilename = await generateAudio(script);
+    console.log('Audio generated successfully');
+
+    // Get video keywords
+    console.log('Getting video keywords...');
+    const videoKeywords = await getVideoKeywords(script);
+    console.log('Video keywords generated successfully');
+
+    // Download videos
+    console.log('Downloading videos...');
+    const downloadedVideos = await downloadVideo(videoKeywords);
+    console.log(`Downloaded ${downloadedVideos.length} videos successfully`);
+
+    // Execute professional video editing
+    console.log('Creating professional video montage...');
+    const editedVideo = await executeVideoEditing(
+      downloadedVideos,
+      audioFilename
+    );
+    console.log('Professional video editing completed successfully');
+
+    // Return success response with metadata
+    const response = {
+      success: true,
+      data: {
+        videoLocation: editedVideo.filename,
+        metadata: {
+          script: script,
+          audioFile: audioFilename,
+          keywords: videoKeywords,
+          downloadedVideos: downloadedVideos.map((v) => ({
+            filename: v.filename,
+            source: v.source,
+            creator: v.creator,
+            duration: v.duration,
+          })),
+          editingOperations: editedVideo.operations,
+          processedAt: new Date().toISOString(),
+        },
+      },
+    };
+
+    console.log('Video generation completed successfully');
+    res.status(200).json(response);
+  } catch (error) {
+    console.error('Error in video generation:', error.message);
+
+    // Return detailed error response
+    res.status(500).json({
+      success: false,
+      error: {
+        message: error.message,
+        code: getErrorCode(error.message),
+        timestamp: new Date().toISOString(),
+      },
+    });
+  }
 };
+
+// Helper function to categorize errors
+function getErrorCode(errorMessage) {
+  const message = errorMessage.toLowerCase();
+
+  if (
+    message.includes('video download failed') ||
+    message.includes('no videos found')
+  ) {
+    return 'VIDEO_DOWNLOAD_ERROR';
+  }
+  if (message.includes('video editing failed')) {
+    return 'VIDEO_EDITING_ERROR';
+  }
+  if (message.includes('script') || message.includes('generation')) {
+    return 'SCRIPT_GENERATION_ERROR';
+  }
+  if (message.includes('audio')) {
+    return 'AUDIO_GENERATION_ERROR';
+  }
+  if (message.includes('keywords')) {
+    return 'KEYWORD_EXTRACTION_ERROR';
+  }
+
+  return 'UNKNOWN_ERROR';
+}
