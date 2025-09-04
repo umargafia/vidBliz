@@ -23,13 +23,13 @@ async function extractKeywords(segment) {
       max_tokens: 50,
     };
     let keywords = [];
-    for await (const event of replicate.stream('openai/gpt-5', { input })) {
+    for await (const event of replicate.stream('openai/gpt-4o', { input })) {
       keywords.push(event);
     }
     return keywords
       .join('')
       .split(',')
-      .map((k) => k.trim())
+      .map((k) => k.trim().replace(/^-|\n/g, '')) // Remove leading hyphens and newlines
       .filter((k) => k.length > 2);
   } catch (error) {
     console.error('Error extracting keywords:', error.message);
@@ -104,6 +104,7 @@ function segmentScript(script) {
 async function downloadMedia(url, filename) {
   try {
     const response = await fetch(url);
+    if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
     const buffer = await response.arrayBuffer();
     await writeFile(filename, Buffer.from(buffer));
     return filename;
@@ -168,6 +169,8 @@ async function searchAndDownloadMedia(
               query
             )}&per_page=${limit}`
           );
+          if (!response.ok)
+            throw new Error(`HTTP error! status: ${response.status}`);
           const data = await response.json();
           return (type === 'video' ? data.hits : data.hits).map((h) => ({
             url: type === 'video' ? h.videos.medium.url : h.largeImageURL,
@@ -180,29 +183,14 @@ async function searchAndDownloadMedia(
         }
       },
     },
-    {
-      name: 'Mixkit',
-      search: async () => {
-        try {
-          const response = await fetch(
-            `https://mixkit.co/api/free-stock-videos/?q=${encodeURIComponent(
-              query
-            )}&per_page=${limit}`
-          );
-          const data = await response.json();
-          return type === 'video'
-            ? data.assets.map((a) => ({
-                url: a.url,
-                creator: 'Mixkit',
-                tags: a.tags || [],
-              }))
-            : [];
-        } catch (error) {
-          console.error(`Mixkit ${type} search failed:`, error.message);
-          return [];
-        }
-      },
-    },
+    // Note: Mixkit doesn't have a public API, so we'll skip this source
+    // {
+    //   name: 'Mixkit',
+    //   search: async () => {
+    //     console.log('Mixkit API not available, skipping...');
+    //     return [];
+    //   },
+    // },
   ];
 
   let allMedia = [];
@@ -241,6 +229,82 @@ async function searchAndDownloadMedia(
     }
   }
   return downloadedMedia;
+}
+
+// Download background music from Pixabay (free music)
+async function downloadBackgroundMusic() {
+  console.log('Searching for background music on Pixabay...');
+
+  if (!PIXABAY_API_KEY) {
+    console.log('Pixabay API key not found. Skipping background music.');
+    return null;
+  }
+
+  try {
+    // Search for royalty-free background music on Pixabay
+    const searchQueries = [
+      'upbeat background music',
+      'corporate music',
+      'happy music',
+      'commercial music',
+    ];
+
+    for (const query of searchQueries) {
+      console.log(`Trying music search: "${query}"`);
+
+      const response = await fetch(
+        `https://pixabay.com/api/music/?key=${PIXABAY_API_KEY}&q=${encodeURIComponent(
+          query
+        )}&per_page=3&safesearch=true`
+      );
+
+      if (!response.ok) {
+        console.log(
+          `Pixabay API error: ${response.status} ${response.statusText}`
+        );
+        continue;
+      }
+
+      const data = await response.json();
+      console.log(
+        `Pixabay response for "${query}":`,
+        data.total,
+        'tracks found'
+      );
+
+      if (data.hits && data.hits.length > 0) {
+        // Find a track with download URL
+        for (const track of data.hits) {
+          if (track.download_url) {
+            const filename = `assets/audio/background_music_${Date.now()}.mp3`;
+            console.log(`Downloading background music: "${track.tags}"...`);
+
+            const downloaded = await downloadMedia(
+              track.download_url,
+              filename
+            );
+            if (downloaded) {
+              console.log(`Background music downloaded: ${filename}`);
+              return {
+                filename,
+                url: track.download_url,
+                creator: track.user,
+                source: 'Pixabay',
+                tags: track.tags,
+                duration: track.duration || 30,
+              };
+            }
+          }
+        }
+      }
+    }
+
+    console.log('No downloadable background music found on Pixabay');
+    return null;
+  } catch (error) {
+    console.error('Error downloading background music:', error.message);
+    return null;
+  }
 }
 
 // Get audio duration
@@ -315,14 +379,42 @@ async function createDynamicVideo(media, segmentTimings, audioDuration) {
   });
 }
 
-// Combine video and audio
-async function createFinalAd(videoPath, audioPath) {
+// Combine video, voiceover audio, and background music
+async function createFinalAd(videoPath, audioPath, backgroundMusicPath) {
   console.log('Creating final advertisement...');
   return new Promise((resolve, reject) => {
-    ffmpeg()
-      .input(videoPath)
-      .input(audioPath)
-      .outputOptions([
+    const command = ffmpeg().input(videoPath).input(audioPath);
+
+    let outputOptions = [
+      '-map',
+      '0:v', // Map video from first input
+      '-map',
+      '1:a', // Map voiceover audio from second input
+      '-c:v',
+      'libx264',
+      '-c:a',
+      'aac',
+      '-pix_fmt',
+      'yuv420p',
+      '-shortest',
+    ];
+
+    if (backgroundMusicPath) {
+      console.log(`Adding background music: ${backgroundMusicPath}`);
+      command.input(backgroundMusicPath);
+
+      // Mix voiceover (100% volume) with background music (20% volume)
+      command.complexFilter([
+        '[1:a]volume=1.0[voice]',
+        '[2:a]volume=0.2[bg]',
+        '[voice][bg]amix=inputs=2:duration=shortest[mixed]',
+      ]);
+
+      outputOptions = [
+        '-map',
+        '0:v', // Map video from first input
+        '-map',
+        '[mixed]', // Map mixed audio
         '-c:v',
         'libx264',
         '-c:a',
@@ -330,9 +422,15 @@ async function createFinalAd(videoPath, audioPath) {
         '-pix_fmt',
         'yuv420p',
         '-shortest',
-      ])
+      ];
+    }
+
+    command
+      .outputOptions(outputOptions)
       .output('assets/final_ad.mp4')
-      .on('start', () => console.log('Combining video and audio...'))
+      .on('start', () =>
+        console.log('Combining video, voiceover, and background music...')
+      )
       .on('progress', (progress) => {
         if (progress.percent)
           console.log(`Final ad progress: ${Math.round(progress.percent)}%`);
@@ -389,19 +487,20 @@ async function addTextOverlay(inputVideo, text, outputPath, timing) {
     await mkdir('assets', { recursive: true });
     await mkdir('assets/videos', { recursive: true });
     await mkdir('assets/photos', { recursive: true });
+    await mkdir('assets/audio', { recursive: true });
     console.log('Assets directories created');
 
     // Generate script
     const prompt =
-      'Create an engaging ad for Sabikuk, the online catering school and marketplace where chefs teach, sell recipes and spices, and students learn to cook anytime, anywhere.';
+      'A device management system that gives you the ability to find, manage, and control all of your devices in one dashboard.';
     const input = {
-      prompt: `Generate a 30-50 word video ad script for: ${prompt}. Keep it concise, engaging, and suitable for a 15-30 second ad. Use a warm, inviting tone and include a clear call-to-action. Split into 3-4 sentences.`,
+      prompt: `Generate a 30-50 word video ad script for: ${prompt}. Start with an attention-grabbing hook to entice viewers to watch. Keep it concise, engaging, and suitable for a 15-30 second ad. Use a warm, inviting tone and include a clear call-to-action. Split into 3-4 sentences.`,
       max_tokens: 100,
     };
 
     console.log('Generating script...');
     let script = '';
-    for await (const event of replicate.stream('openai/gpt-5', { input })) {
+    for await (const event of replicate.stream('openai/gpt-4o', { input })) {
       script += event;
     }
     console.log('Generated script:', script);
@@ -434,12 +533,23 @@ async function addTextOverlay(inputVideo, text, outputPath, timing) {
       input: audioInput,
     });
     const audioResponse = await fetch(audioOutput);
+    if (!audioResponse.ok)
+      throw new Error(`HTTP error! status: ${audioResponse.status}`);
     const audioBuffer = await audioResponse.arrayBuffer();
-    await writeFile('assets/output_audio.wav', Buffer.from(audioBuffer));
-    console.log('Audio file saved as assets/output_audio.wav');
+    await writeFile('assets/audio/output_audio.wav', Buffer.from(audioBuffer));
+    console.log('Audio file saved as assets/audio/output_audio.wav');
+
+    // Download background music
+    const backgroundMusic = await downloadBackgroundMusic();
+    const backgroundMusicPath = backgroundMusic
+      ? backgroundMusic.filename
+      : null;
+    console.log(`Background music: ${backgroundMusicPath || 'None'}`);
 
     // Get audio duration
-    const audioDuration = await getAudioDuration('assets/output_audio.wav');
+    const audioDuration = await getAudioDuration(
+      'assets/audio/output_audio.wav'
+    );
     console.log(`Audio duration: ${audioDuration.toFixed(2)} seconds`);
 
     // Assign timings to segments
@@ -506,10 +616,11 @@ async function addTextOverlay(inputVideo, text, outputPath, timing) {
       throw new Error('No media available to create video');
     }
 
-    // Create final ad
+    // Create final ad with background music
     const finalAdPath = await createFinalAd(
       dynamicVideo,
-      'assets/output_audio.wav'
+      'assets/audio/output_audio.wav',
+      backgroundMusicPath
     );
     console.log(`Final ad created: ${finalAdPath}`);
 
@@ -530,7 +641,8 @@ async function addTextOverlay(inputVideo, text, outputPath, timing) {
     const assetSummary = {
       script,
       segments,
-      audio: 'assets/output_audio.wav',
+      audio: 'assets/audio/output_audio.wav',
+      backgroundMusic: backgroundMusicPath || 'None',
       media: validMedia,
       dynamicVideo,
       finalAd: finalAdPath,
@@ -548,11 +660,14 @@ async function addTextOverlay(inputVideo, text, outputPath, timing) {
     console.log('\n--- Process Completed Successfully! ---');
     console.log(`Generated Script: "${script}"`);
     console.log(
-      `Audio File: assets/output_audio.wav (${audioDuration.toFixed(2)}s)`
+      `Audio File: assets/audio/output_audio.wav (${audioDuration.toFixed(2)}s)`
     );
+    console.log(`Background Music: ${backgroundMusicPath || 'None'}`);
     console.log(`Media Files Downloaded: ${validMedia.length}`);
     console.log(`Final Advertisement: ${finalAdWithText}`);
-    console.log('\n🎉 Your dynamic video advertisement is ready!');
+    console.log(
+      '\n🎉 Your dynamic video advertisement with background music is ready!'
+    );
   } catch (error) {
     console.error('Error in ad creation:', error.message);
   }
