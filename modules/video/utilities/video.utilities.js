@@ -1,6 +1,6 @@
 import Replicate from 'replicate';
 import dotenv from 'dotenv';
-import { writeFile, mkdir, access, stat } from 'fs/promises';
+import { writeFile, mkdir, access, stat, unlink } from 'fs/promises';
 import { v4 as uuidv4 } from 'uuid';
 import { createClient } from 'pexels';
 import ffmpeg from 'fluent-ffmpeg';
@@ -401,7 +401,7 @@ export const executeVideoEditing = async (videoLocations, audioFilename) => {
           .input(audioFilename)
           .outputOptions([
             '-vf',
-            'scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=30',
+            'scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=30',
             '-c:v',
             'libx264',
             '-c:a',
@@ -452,9 +452,9 @@ export const executeVideoEditing = async (videoLocations, audioFilename) => {
         // Build filter complex for concatenation
         let filterComplex = '';
 
-        // Normalize all videos to same format and trim to segment duration
+        // Normalize all videos to mobile format (9:16) and trim to segment duration
         for (let i = 0; i < videoLocations.length; i++) {
-          filterComplex += `[${i}:v]trim=duration=${segmentDuration},scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=30,setpts=PTS-STARTPTS[v${i}norm];`;
+          filterComplex += `[${i}:v]trim=duration=${segmentDuration},scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=30,setpts=PTS-STARTPTS[v${i}norm];`;
         }
 
         // Concatenate all normalized videos
@@ -504,6 +504,28 @@ export const executeVideoEditing = async (videoLocations, audioFilename) => {
   }
 };
 
+// Clean up downloaded stock videos to save storage
+async function cleanupStockVideos(videoLocations) {
+  console.log('🧹 Cleaning up downloaded stock videos to save storage...');
+  let deletedCount = 0;
+  let failedCount = 0;
+
+  for (const video of videoLocations) {
+    try {
+      await unlink(video.filename);
+      deletedCount++;
+      console.log(`✓ Deleted: ${video.filename}`);
+    } catch (error) {
+      failedCount++;
+      console.error(`✗ Failed to delete: ${video.filename} - ${error.message}`);
+    }
+  }
+
+  console.log(
+    `🧹 Cleanup complete: ${deletedCount} deleted, ${failedCount} failed`
+  );
+}
+
 // Helper function to set up FFmpeg events
 function setupFFmpegEvents(
   command,
@@ -527,26 +549,41 @@ function setupFFmpegEvents(
         }
       }
     })
-    .on('end', () => {
+    .on('end', async () => {
       console.log('Multi-video editing completed successfully!');
+
+      // Clean up stock videos after successful processing
+      await cleanupStockVideos(videoLocations);
+
       resolve({
         filename: outputPath,
         operations:
           videoLocations.length === 1
-            ? ['scale', 'audio_sync']
-            : ['scale', 'concatenate', 'audio_sync'],
+            ? ['scale', 'audio_sync', 'mobile_format', 'cleanup']
+            : [
+                'scale',
+                'concatenate',
+                'audio_sync',
+                'mobile_format',
+                'cleanup',
+              ],
         inputVideos: videoLocations,
         audioDuration: audioDuration,
         videoCount: videoLocations.length,
         success: true,
       });
     })
-    .on('error', (err) => {
+    .on('error', async (err) => {
       console.error('FFmpeg error occurred:');
       console.error('Error message:', err.message);
       if (err.stderr) {
         console.error('FFmpeg stderr:', err.stderr);
       }
+
+      // Clean up even on error to save space
+      console.log('Cleaning up due to error...');
+      await cleanupStockVideos(videoLocations);
+
       reject(new Error(`Video editing failed: ${err.message}`));
     });
 }
