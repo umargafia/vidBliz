@@ -40,7 +40,7 @@ export const generateScript = async (prompt) => {
     }, 60000); // 60 second timeout
 
     try {
-      for await (const event of replicate.stream('openai/gpt-4o', { input })) {
+      for await (const event of replicate.stream('openai/gpt-5', { input })) {
         script += event;
       }
       clearTimeout(timeout);
@@ -123,7 +123,7 @@ export const getVideoKeywords = async (script) => {
     }, 30000); // 30 second timeout
 
     try {
-      for await (const event of replicate.stream('openai/gpt-4o', { input })) {
+      for await (const event of replicate.stream('openai/gpt-5', { input })) {
         keywords.push(event);
       }
       clearTimeout(timeout);
